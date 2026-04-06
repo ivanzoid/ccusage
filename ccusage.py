@@ -140,9 +140,6 @@ def fetch_usage(headers: dict) -> tuple:
                 _backoff_until = 0.0
                 return resp.json(), None
             elif resp.status_code == 429:
-                if attempt < 2:
-                    time.sleep(4 * (2 ** attempt) + random.uniform(0, 2))
-                    continue
                 duration = min(300 * (2 ** _consecutive_429s), 3600)
                 _backoff_until = time.time() + duration
                 _consecutive_429s += 1
