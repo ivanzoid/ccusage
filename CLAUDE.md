@@ -1,4 +1,4 @@
-# claude-usage
+# ccusage
 
 Minimal terminal monitor for Claude Code rate-limit usage.
 
@@ -9,12 +9,13 @@ Draws two live-updating progress bars:
 - **7d** — 7-day rate-limit utilization
 
 Each bar shows:
+- Percentage left of the bar
 - Fill-style bar (`█` filled, `░` empty) colored by utilization:
-  - Green  ≤ 50 %
-  - Yellow 50–81 %
-  - Orange 81–95 %
-  - Red    > 95 %
-- Current utilization percentage
+  - Cyan   0–40 %   (idle)
+  - Green  40–65 %  (healthy)
+  - Yellow 65–80 %  (moderate)
+  - Orange 80–92 %  (high)
+  - Red    92 %+    (critical)
 - Time to reset: relative (`in 2h 30m`) and absolute (`14:30` or `Mon 14:30`)
 
 Bars resize to full terminal width. Refreshes every 30 seconds.
@@ -22,8 +23,8 @@ Bars resize to full terminal width. Refreshes every 30 seconds.
 ## Structure
 
 ```
-claude-usage/
-  claude_usage.py   # everything: auth, API, rendering
+ccusage/
+  ccusage.py   # everything: auth, API, rendering
   CLAUDE.md
 ```
 
@@ -43,9 +44,9 @@ On macOS falls back to the system Keychain if the file is missing or the token i
 ## Running
 
 ```bash
-python claude_usage.py
+python ccusage.py
 # or
-chmod +x claude_usage.py && ./claude_usage.py
+chmod +x ccusage.py && ./ccusage.py
 ```
 
 ## API endpoint

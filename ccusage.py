@@ -29,6 +29,7 @@ BOLD = "\033[1m"
 def _color(r, g, b):
     return f"\033[38;2;{r};{g};{b}m"
 
+CYAN   = _color(40, 200, 220)
 GREEN  = _color(80, 200, 80)
 YELLOW = _color(220, 200, 40)
 ORANGE = _color(255, 140, 0)
@@ -36,13 +37,15 @@ RED    = _color(220, 50, 50)
 DIM    = "\033[2m"
 
 def usage_color(pct: float) -> str:
-    if pct >= 95:
+    if pct >= 92:
         return RED
-    if pct >= 81:
+    if pct >= 80:
         return ORANGE
-    if pct >= 50:
+    if pct >= 65:
         return YELLOW
-    return GREEN
+    if pct >= 40:
+        return GREEN
+    return CYAN
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -198,7 +201,7 @@ def _draw_bar(label: str, pct: float, reset_dt: datetime | None, bar_width: int)
     else:
         reset_str = ""
 
-    return f"{BOLD}{label}{RESET} {bar}  {color}{BOLD}{pct_str}{RESET}{reset_str}"
+    return f"{BOLD}{label}{RESET} {color}{BOLD}{pct_str}{RESET} {bar}{reset_str}"
 
 # ── Render loop ───────────────────────────────────────────────────────────────
 
@@ -214,9 +217,8 @@ def render(usage: dict | None, error: str | None):
 
     term_w = shutil.get_terminal_size((80, 24)).columns
 
-    # Fixed overhead: label(2) + space(1) + 2 spaces before pct + pct(7) + reset(~22 max)
-    # Keep it generous: reserve 35 chars for right side, 3 for label+space
-    overhead = 3 + 2 + 7 + 22  # label + bar-gap + pct + reset
+    # Fixed overhead: label(2) + space(1) + pct(7) + space(1) + reset(~22 max)
+    overhead = 2 + 1 + 7 + 1 + 22  # label + pct + bar-gap + reset
     bar_w = max(10, term_w - overhead)
 
     lines = []
