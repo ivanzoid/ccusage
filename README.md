@@ -56,6 +56,8 @@ On macOS, falls back to the system Keychain if the file is missing or the token 
 
 Polls `GET https://api.anthropic.com/api/oauth/usage` every 30 seconds and redraws the two lines in-place. No databases, no config files, no background processes.
 
+When rate-limited, shows a live countdown (`Rate-limited — retry in 4m`) that updates every second using exponential backoff.
+
 ## Origin
 
 Derived from [LightspeedDMS/claude-usage](https://github.com/LightspeedDMS/claude-usage) — stripped down to the two usage bars and rewritten to use only ANSI escape codes (no `rich` dependency).
