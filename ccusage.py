@@ -247,8 +247,9 @@ def render(usage: dict | None, error: str | None):
     else:
         _first_draw = False
 
-    for line in lines:
-        print(line)
+    for i, line in enumerate(lines):
+        end = "\n" if i < len(lines) - 1 else ""
+        print(line, end=end, flush=True)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
