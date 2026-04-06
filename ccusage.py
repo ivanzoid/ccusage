@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import locale
 import platform
 import shutil
 import signal
@@ -22,6 +23,15 @@ STATE_PATH        = Path.home() / ".ccusage_cache.json"
 API_BASE = "https://api.anthropic.com"
 USAGE_ENDPOINT = "/api/oauth/usage"
 REFRESH_SECONDS = 120
+
+def _detect_12h() -> bool:
+    try:
+        return "%I" in locale.nl_langinfo(locale.T_FMT) or \
+               "%l" in locale.nl_langinfo(locale.T_FMT)
+    except Exception:
+        return False
+
+_USE_12H = _detect_12h()
 
 # ── ANSI helpers ─────────────────────────────────────────────────────────────
 
@@ -205,14 +215,21 @@ def _format_relative(seconds: float) -> str:
         return f"{hours}h{minutes}m" if minutes else f"{hours}h"
     return f"{minutes}m" if minutes else (f"{s}s" if s else "now")
 
+def _fmt_time(dt: datetime) -> str:
+    """Format time component respecting the system 12/24h preference."""
+    if _USE_12H:
+        return dt.strftime("%-I:%M %p")   # "1:30 PM"  (no leading zero)
+    return dt.strftime("%H:%M")            # "13:30"
+
 def _format_absolute(reset_dt: datetime) -> str:
     """Return absolute time: HH:MM if today, else 'Mon HH:MM'."""
     now = datetime.now(timezone.utc)
     local_reset = reset_dt.astimezone()
     local_now = now.astimezone()
+    t = _fmt_time(local_reset)
     if local_reset.date() == local_now.date():
-        return local_reset.strftime("%H:%M")
-    return local_reset.strftime("%a %H:%M")
+        return t
+    return f"{local_reset.strftime('%a')} {t}"
 
 def _parse_reset(resets_at: str) -> datetime | None:
     if not resets_at:
@@ -224,7 +241,7 @@ def _parse_reset(resets_at: str) -> datetime | None:
 
 def _format_timestamp(dt: datetime) -> str:
     """Return a local wall-clock timestamp for status updates."""
-    return dt.astimezone().strftime("%H:%M")
+    return _fmt_time(dt.astimezone())
 
 # ── Bar drawing ───────────────────────────────────────────────────────────────
 
@@ -345,14 +362,17 @@ def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
 
     term_w = shutil.get_terminal_size((80, 24)).columns
 
-    # Fixed overhead: label(2) + space(1) + pct(4) + space(1) + reset(~22 max)
-    overhead = 2 + 1 + 4 + 1 + 22  # label + pct + bar-gap + reset
+    # Fixed overhead: label(2) + space(1) + pct(4) + space(1) + reset + safety(1)
+    # reset max: 24h "  in 1d 2h (Mon 23:59)" = 22, 12h "  in 1d 2h (Mon 12:30 PM)" = 25
+    # Subtract 1 extra to stay under term_w — reaching the last column triggers
+    # auto-wrap in most terminals, which adds a spurious newline.
+    reset_max = 25 if _USE_12H else 22
+    overhead = 2 + 1 + 4 + 1 + reset_max + 1
     bar_w = max(10, term_w - overhead)
 
     lines = []
 
-    if top_status:
-        lines.append(top_status)
+    lines.append(top_status)  # always reserve the line; may be empty
 
     if usage is not None:
         fh = usage.get("five_hour", {})
