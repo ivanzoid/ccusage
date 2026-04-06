@@ -1,14 +1,25 @@
 """Tests for ccusage.py"""
 
+import json
+import time
 import unittest
 from datetime import datetime, timezone, timedelta
+from unittest.mock import MagicMock, patch
 
+import ccusage
 from ccusage import (
     _format_relative,
     _format_absolute,
+    _parse_retry_after,
+    _build_bar_str,
+    _save_state,
+    _load_state,
+    fetch_usage,
     usage_color,
     _draw_bar,
-    CYAN, GREEN, YELLOW, ORANGE, RED,
+    CYAN, GREEN, YELLOW, ORANGE, RED, TIME_COLOR, RESET, BOLD, DIM,
+    FILLED, EMPTY, MARKER,
+    STATE_PATH,
 )
 
 
@@ -166,6 +177,401 @@ class TestDrawBar(unittest.TestCase):
         reset_dt = datetime.now(timezone.utc) + timedelta(hours=2, minutes=30)
         line = _draw_bar("5h", 40.0, reset_dt, 20, 5 * 3600)
         self.assertIn(GREEN, line)
+
+    def test_reset_str_uses_time_color(self):
+        reset_dt = datetime.now(timezone.utc) + timedelta(hours=1)
+        line = _draw_bar("5h", 50.0, reset_dt, 20, 5 * 3600)
+        self.assertIn(TIME_COLOR, line)
+        self.assertIn("in ", line)
+
+
+class TestParseRetryAfter(unittest.TestCase):
+    def _mock_resp(self, headers=None, json_body=None):
+        resp = MagicMock()
+        resp.headers = headers or {}
+        if json_body is not None:
+            resp.json.return_value = json_body
+        else:
+            resp.json.side_effect = ValueError("no json")
+        return resp
+
+    def test_numeric_header(self):
+        resp = self._mock_resp({"Retry-After": "120"})
+        self.assertEqual(_parse_retry_after(resp), 120.0)
+
+    def test_lowercase_header(self):
+        resp = self._mock_resp({"retry-after": "60"})
+        self.assertEqual(_parse_retry_after(resp), 60.0)
+
+    def test_json_retry_after(self):
+        resp = self._mock_resp(json_body={"retry_after": 45})
+        self.assertEqual(_parse_retry_after(resp), 45.0)
+
+    def test_nested_json_retry_after(self):
+        resp = self._mock_resp(json_body={"error": {"retry_after": 30}})
+        self.assertEqual(_parse_retry_after(resp), 30.0)
+
+    def test_no_retry_info(self):
+        resp = self._mock_resp()
+        self.assertIsNone(_parse_retry_after(resp))
+
+
+class TestFetchUsage(unittest.TestCase):
+    HEADERS = {"Authorization": "Bearer test-token"}
+    GOOD_PAYLOAD = {
+        "five_hour": {"utilization": 42.0, "resets_at": "2026-04-06T12:00:00+00:00"},
+        "seven_day": {"utilization": 15.0, "resets_at": "2026-04-10T00:00:00+00:00"},
+    }
+
+    def setUp(self):
+        # Reset module-level backoff state before each test
+        ccusage._consecutive_429s = 0
+        ccusage._backoff_until = 0.0
+
+    def _mock_get(self, status_code, json_body=None, headers=None):
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.headers = headers or {}
+        if json_body is not None:
+            resp.json.return_value = json_body
+        else:
+            resp.json.side_effect = ValueError("no json")
+        return resp
+
+    def test_success_200(self):
+        with patch("ccusage.requests.get", return_value=self._mock_get(200, self.GOOD_PAYLOAD)):
+            data, err = fetch_usage(self.HEADERS)
+        self.assertIsNone(err)
+        self.assertEqual(data["five_hour"]["utilization"], 42.0)
+        self.assertEqual(ccusage._consecutive_429s, 0)
+        self.assertEqual(ccusage._backoff_until, 0.0)
+
+    def test_success_clears_backoff(self):
+        ccusage._consecutive_429s = 3
+        ccusage._backoff_until = 0.0  # already expired
+        with patch("ccusage.requests.get", return_value=self._mock_get(200, self.GOOD_PAYLOAD)):
+            data, err = fetch_usage(self.HEADERS)
+        self.assertIsNone(err)
+        self.assertEqual(ccusage._consecutive_429s, 0)
+
+    def test_429_with_retry_after_header(self):
+        resp = self._mock_get(429, headers={"Retry-After": "90"})
+        resp.json.side_effect = ValueError("no json")
+        with patch("ccusage.requests.get", return_value=resp):
+            data, err = fetch_usage(self.HEADERS)
+        self.assertIsNone(data)
+        self.assertIn("Rate-limited", err)
+        self.assertGreater(ccusage._backoff_until, time.time() + 80)
+
+    def test_429_without_retry_after_uses_exponential_backoff(self):
+        resp = self._mock_get(429)
+        resp.json.side_effect = ValueError("no json")
+        with patch("ccusage.requests.get", return_value=resp):
+            data, err = fetch_usage(self.HEADERS)
+        self.assertIsNone(data)
+        self.assertIn("Rate-limited", err)
+        # First backoff: 300 * 2^0 = 300s; consecutive_429s bumped to 1
+        self.assertEqual(ccusage._consecutive_429s, 1)
+        self.assertGreater(ccusage._backoff_until, time.time() + 290)
+
+    def test_429_exponential_backoff_increases(self):
+        ccusage._consecutive_429s = 2
+        resp = self._mock_get(429)
+        resp.json.side_effect = ValueError("no json")
+        with patch("ccusage.requests.get", return_value=resp):
+            data, err = fetch_usage(self.HEADERS)
+        # backoff = 300 * 2^2 = 1200s, consecutive_429s → 3
+        self.assertEqual(ccusage._consecutive_429s, 3)
+        self.assertGreater(ccusage._backoff_until, time.time() + 1190)
+
+    def test_429_backoff_capped_at_3600(self):
+        ccusage._consecutive_429s = 20  # would overflow without cap
+        resp = self._mock_get(429)
+        resp.json.side_effect = ValueError("no json")
+        with patch("ccusage.requests.get", return_value=resp):
+            fetch_usage(self.HEADERS)
+        self.assertLessEqual(ccusage._backoff_until, time.time() + 3601)
+
+    def test_skips_request_during_backoff(self):
+        ccusage._backoff_until = time.time() + 500
+        with patch("ccusage.requests.get") as mock_get:
+            data, err = fetch_usage(self.HEADERS)
+        mock_get.assert_not_called()
+        self.assertIsNone(data)
+        self.assertIn("Rate-limited", err)
+
+    def test_401_unauthorized(self):
+        with patch("ccusage.requests.get", return_value=self._mock_get(401)):
+            data, err = fetch_usage(self.HEADERS)
+        self.assertIsNone(data)
+        self.assertIn("401", err)
+
+    def test_other_http_error(self):
+        with patch("ccusage.requests.get", return_value=self._mock_get(500)):
+            data, err = fetch_usage(self.HEADERS)
+        self.assertIsNone(data)
+        self.assertIn("500", err)
+
+    def test_network_error(self):
+        import requests as req_lib
+        with patch("ccusage.requests.get", side_effect=req_lib.exceptions.ConnectionError("refused")):
+            data, err = fetch_usage(self.HEADERS)
+        self.assertIsNone(data)
+        self.assertIn("Network error", err)
+
+    def test_invalid_json_response(self):
+        resp = self._mock_get(200)
+        resp.json.side_effect = ValueError("bad json")
+        with patch("ccusage.requests.get", return_value=resp):
+            data, err = fetch_usage(self.HEADERS)
+        self.assertIsNone(data)
+        self.assertIn("invalid JSON", err)
+
+    def test_non_dict_response(self):
+        resp = self._mock_get(200)
+        resp.json.return_value = ["unexpected", "list"]
+        with patch("ccusage.requests.get", return_value=resp):
+            data, err = fetch_usage(self.HEADERS)
+        self.assertIsNone(data)
+        self.assertIsNotNone(err)
+
+
+class TestRender(unittest.TestCase):
+    """Smoke-tests for render() — checks line count and key strings."""
+
+    def setUp(self):
+        ccusage._first_draw = True
+
+    def _capture_render(self, *args, **kwargs):
+        import io
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            ccusage.render(*args, **kwargs)
+        return buf.getvalue()
+
+    def test_render_with_usage(self):
+        usage = {
+            "five_hour": {"utilization": 50.0, "resets_at": ""},
+            "seven_day": {"utilization": 20.0, "resets_at": ""},
+        }
+        out = self._capture_render(usage)
+        self.assertIn("5h", out)
+        self.assertIn("7d", out)
+
+    def test_render_without_usage_shows_fetching(self):
+        out = self._capture_render(None)
+        self.assertIn("Fetching", out)
+
+    def test_render_top_status_included(self):
+        out = self._capture_render(None, top_status="HELLO_STATUS")
+        self.assertIn("HELLO_STATUS", out)
+
+    def test_render_bottom_status_included(self):
+        out = self._capture_render(None, bottom_status="BOTTOM_STATUS")
+        self.assertIn("BOTTOM_STATUS", out)
+
+    def test_render_synced_line_in_top_status(self):
+        out = self._capture_render(
+            {"five_hour": {"utilization": 30.0, "resets_at": ""},
+             "seven_day": {"utilization": 10.0, "resets_at": ""}},
+            top_status="\033[2msynced 5m ago (10:00)\033[0m",
+        )
+        self.assertIn("synced", out)
+        self.assertIn("ago", out)
+
+    def test_render_no_synced_line_when_top_status_empty(self):
+        out = self._capture_render(
+            {"five_hour": {"utilization": 30.0, "resets_at": ""},
+             "seven_day": {"utilization": 10.0, "resets_at": ""}},
+            top_status="",
+        )
+        self.assertNotIn("synced", out)
+
+    def test_render_includes_marker_when_resets_at_known(self):
+        reset_dt = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        usage = {
+            "five_hour": {"utilization": 50.0, "resets_at": reset_dt},
+            "seven_day": {"utilization": 20.0, "resets_at": reset_dt},
+        }
+        out = self._capture_render(usage)
+        self.assertIn(ccusage.MARKER, out)
+
+    def test_render_adapts_to_terminal_width(self):
+        usage = {
+            "five_hour": {"utilization": 50.0, "resets_at": ""},
+            "seven_day": {"utilization": 20.0, "resets_at": ""},
+        }
+        with patch("shutil.get_terminal_size", return_value=MagicMock(columns=40)):
+            out40 = self._capture_render(usage)
+        ccusage._first_draw = True
+        with patch("shutil.get_terminal_size", return_value=MagicMock(columns=120)):
+            out120 = self._capture_render(usage)
+        # Wider terminal → more bar characters
+        bar_chars = lambda s: s.count("█") + s.count("░")
+        self.assertGreater(bar_chars(out120), bar_chars(out40))
+
+
+class TestBuildBarStr(unittest.TestCase):
+    COLOR = "\033[38;2;80;200;80m"  # GREEN
+
+    def test_no_marker_simple(self):
+        s = _build_bar_str(10, 5, self.COLOR, None)
+        self.assertEqual(s.count(FILLED), 5)
+        self.assertEqual(s.count(EMPTY), 5)
+        self.assertNotIn(MARKER, s)
+
+    def test_no_marker_all_filled(self):
+        s = _build_bar_str(10, 10, self.COLOR, None)
+        self.assertEqual(s.count(FILLED), 10)
+        self.assertEqual(s.count(EMPTY), 0)
+
+    def test_no_marker_all_empty(self):
+        s = _build_bar_str(10, 0, self.COLOR, None)
+        self.assertEqual(s.count(FILLED), 0)
+        self.assertEqual(s.count(EMPTY), 10)
+
+    def test_marker_present(self):
+        s = _build_bar_str(10, 5, self.COLOR, 3)
+        self.assertIn(MARKER, s)
+
+    def test_marker_reduces_filled_empty_by_one(self):
+        # marker replaces one char slot → filled + empty = bar_width - 1
+        s = _build_bar_str(10, 5, self.COLOR, 3)
+        self.assertEqual(s.count(FILLED) + s.count(EMPTY), 9)
+
+    def test_marker_at_zero(self):
+        s = _build_bar_str(10, 5, self.COLOR, 0)
+        self.assertIn(MARKER, s)
+        self.assertEqual(s.count(FILLED) + s.count(EMPTY), 9)
+
+    def test_marker_at_last(self):
+        s = _build_bar_str(10, 5, self.COLOR, 9)
+        self.assertIn(MARKER, s)
+
+    def test_marker_clamped_below_zero(self):
+        # time_pos < 0 → clamped to 0
+        s = _build_bar_str(10, 5, self.COLOR, -5)
+        self.assertIn(MARKER, s)
+
+    def test_marker_clamped_above_width(self):
+        # time_pos >= bar_width → clamped to bar_width - 1
+        s = _build_bar_str(10, 5, self.COLOR, 20)
+        self.assertIn(MARKER, s)
+
+    def test_marker_in_filled_region(self):
+        # time_pos < filled → marker is inside the filled section
+        s = _build_bar_str(10, 7, self.COLOR, 3)
+        # marker should appear before most of the filled chars
+        marker_idx = s.index(MARKER)
+        filled_after = s[marker_idx:].count(FILLED)
+        self.assertGreater(filled_after, 0)
+
+    def test_marker_in_empty_region(self):
+        # time_pos > filled → marker is inside the empty section
+        s = _build_bar_str(10, 3, self.COLOR, 7)
+        marker_idx = s.index(MARKER)
+        empty_after = s[marker_idx:].count(EMPTY)
+        self.assertGreater(empty_after, 0)
+
+    def test_draw_bar_includes_marker_with_reset_dt(self):
+        reset_dt = datetime.now(timezone.utc) + timedelta(hours=2, minutes=30)
+        line = _draw_bar("5h", 50.0, reset_dt, 20, 5 * 3600)
+        self.assertIn(MARKER, line)
+
+    def test_draw_bar_no_marker_without_reset_dt(self):
+        line = _draw_bar("5h", 50.0, None, 20, 5 * 3600)
+        self.assertNotIn(MARKER, line)
+
+
+class TestStateCache(unittest.TestCase):
+    USAGE = {
+        "five_hour": {"utilization": 55.0, "resets_at": "2026-04-06T15:00:00+00:00"},
+        "seven_day": {"utilization": 20.0, "resets_at": "2026-04-10T00:00:00+00:00"},
+    }
+
+    def setUp(self):
+        ccusage._backoff_until = 0.0
+        ccusage._consecutive_429s = 0
+        if STATE_PATH.exists():
+            STATE_PATH.unlink()
+
+    def tearDown(self):
+        if STATE_PATH.exists():
+            STATE_PATH.unlink()
+
+    NOW = datetime.now(timezone.utc)
+
+    def test_save_creates_file(self):
+        _save_state(self.USAGE, self.NOW)
+        self.assertTrue(STATE_PATH.exists())
+
+    def test_save_none_usage_does_not_create_file(self):
+        _save_state(None, self.NOW)
+        self.assertFalse(STATE_PATH.exists())
+
+    def test_save_none_fetched_at_does_not_create_file(self):
+        _save_state(self.USAGE, None)
+        self.assertFalse(STATE_PATH.exists())
+
+    def test_round_trip_usage(self):
+        _save_state(self.USAGE, self.NOW)
+        result = _load_state()
+        self.assertIsNotNone(result)
+        usage, saved_at, delay = result
+        self.assertEqual(usage["five_hour"]["utilization"], 55.0)
+
+    def test_saved_at_matches_fetched_at(self):
+        _save_state(self.USAGE, self.NOW)
+        _, saved_at, _ = _load_state()
+        self.assertAlmostEqual(saved_at.timestamp(), self.NOW.timestamp(), delta=0.001)
+
+    def test_fresh_cache_gives_nonzero_delay(self):
+        _save_state(self.USAGE, self.NOW)
+        _, _, delay = _load_state()
+        self.assertGreater(delay, 0)
+        self.assertLessEqual(delay, ccusage.REFRESH_SECONDS)
+
+    def test_old_cache_gives_zero_delay(self):
+        # Pretend state was saved REFRESH_SECONDS + 10 seconds ago
+        old_time = (datetime.now(timezone.utc) - timedelta(seconds=ccusage.REFRESH_SECONDS + 10)).isoformat()
+        STATE_PATH.write_text(json.dumps({
+            "saved_at": old_time,
+            "backoff_until": 0,
+            "usage": self.USAGE,
+        }))
+        _, _, delay = _load_state()
+        self.assertEqual(delay, 0.0)
+
+    def test_backoff_restored_when_still_active(self):
+        future_backoff = time.time() + 200
+        STATE_PATH.write_text(json.dumps({
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "backoff_until": future_backoff,
+            "usage": self.USAGE,
+        }))
+        _load_state()
+        self.assertAlmostEqual(ccusage._backoff_until, future_backoff, delta=1)
+
+    def test_expired_backoff_not_restored(self):
+        past_backoff = time.time() - 10
+        STATE_PATH.write_text(json.dumps({
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "backoff_until": past_backoff,
+            "usage": self.USAGE,
+        }))
+        _load_state()
+        self.assertEqual(ccusage._backoff_until, 0.0)
+
+    def test_load_missing_file_returns_none(self):
+        self.assertIsNone(_load_state())
+
+    def test_load_corrupt_file_returns_none(self):
+        STATE_PATH.write_text("not json {{{")
+        self.assertIsNone(_load_state())
+
+    def test_load_no_usage_key_returns_none(self):
+        STATE_PATH.write_text(json.dumps({"saved_at": datetime.now(timezone.utc).isoformat()}))
+        self.assertIsNone(_load_state())
 
 
 if __name__ == "__main__":

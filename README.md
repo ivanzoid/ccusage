@@ -5,9 +5,12 @@ Minimal Claude Code rate-limit monitor for the terminal.
 Draws two live-updating bars — 5-hour and 7-day usage — that fill your terminal width and warm in color as consumption grows.
 
 ```
-5h   3% ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  in 4h51m (14:30)
-7d  18% ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  in 5d12h (Thu 14:30)
+synced 3m ago (14:27)
+5h   3% ░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  in 4h51m (14:30)
+7d  18% ████████░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  in 5d12h (Thu 14:30)
 ```
+
+The `│` marker shows the expected burn position — if bars are filled past it you're consuming faster than the average rate.
 
 ## Color scheme
 
@@ -54,9 +57,11 @@ Press `Ctrl+C` to exit.
 Reads OAuth credentials from `~/.claude/.credentials.json` (written by the `claude` CLI).  
 On macOS, falls back to the system Keychain if the file is missing or the token is expired.
 
-Polls `GET https://api.anthropic.com/api/oauth/usage` every 30 seconds and redraws the two lines in-place. No databases, no config files, no background processes.
+Polls `GET https://api.anthropic.com/api/oauth/usage` every 3 minutes and redraws the lines in-place. No databases, no config files, no background processes.
 
-When rate-limited, shows a live countdown (`Rate-limited — retry in 4m`) that updates every second using exponential backoff.
+On exit (`Ctrl+C`), saves the last fetched data and fetch time to `~/.ccusage_cache.json`. On next start, that data is shown immediately and the next API call is delayed so the 3-minute interval is respected across restarts.
+
+When rate-limited, backs off exponentially and shows the error in the status line.
 
 ## Origin
 

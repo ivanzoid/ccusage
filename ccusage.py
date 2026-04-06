@@ -17,9 +17,10 @@ import requests
 # ── Configuration ────────────────────────────────────────────────────────────
 
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
+STATE_PATH        = Path.home() / ".ccusage_cache.json"
 API_BASE = "https://api.anthropic.com"
 USAGE_ENDPOINT = "/api/oauth/usage"
-REFRESH_SECONDS = 30
+REFRESH_SECONDS = 180
 
 # ── ANSI helpers ─────────────────────────────────────────────────────────────
 
@@ -29,12 +30,13 @@ BOLD = "\033[1m"
 def _color(r, g, b):
     return f"\033[38;2;{r};{g};{b}m"
 
-CYAN   = _color(40, 200, 220)
-GREEN  = _color(80, 200, 80)
-YELLOW = _color(220, 200, 40)
-ORANGE = _color(255, 140, 0)
-RED    = _color(220, 50, 50)
-DIM    = "\033[2m"
+CYAN       = _color(40, 200, 220)
+GREEN      = _color(80, 200, 80)
+YELLOW     = _color(220, 200, 40)
+ORANGE     = _color(255, 140, 0)
+RED        = _color(220, 50, 50)
+TIME_COLOR = _color(120, 160, 220)   # fixed color for reset countdowns
+DIM        = "\033[2m"
 
 def usage_color(pct: float, burn_ratio: float | None = None) -> str:
     """Color by burn rate (actual/expected) when available, else raw utilisation."""
@@ -160,9 +162,15 @@ def fetch_usage(headers: dict) -> tuple:
         try:
             resp = requests.get(url, headers=headers, timeout=10)
             if resp.status_code == 200:
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    return None, "API returned invalid JSON"
+                if not isinstance(payload, dict):
+                    return None, "API returned an unexpected response"
                 _consecutive_429s = 0
                 _backoff_until = 0.0
-                return resp.json(), None
+                return payload, None
             elif resp.status_code == 429:
                 api_wait = _parse_retry_after(resp)
                 if api_wait is not None and api_wait > 0:
@@ -213,10 +221,42 @@ def _parse_reset(resets_at: str) -> datetime | None:
     except ValueError:
         return None
 
+def _format_timestamp(dt: datetime) -> str:
+    """Return a local wall-clock timestamp for status updates."""
+    return dt.astimezone().strftime("%H:%M")
+
 # ── Bar drawing ───────────────────────────────────────────────────────────────
 
 FILLED = "█"
 EMPTY  = "░"
+MARKER = "│"  # time-position indicator
+
+def _build_bar_str(bar_width: int, filled: int, color: str, time_pos: int | None) -> str:
+    """Build bar string, optionally inserting a │ marker at `time_pos`."""
+    if time_pos is None:
+        return color + FILLED * filled + DIM + EMPTY * (bar_width - filled) + RESET
+
+    time_pos = max(0, min(time_pos, bar_width - 1))
+    parts = []
+    cur = None  # tracks last-emitted ANSI code to avoid redundant emissions
+
+    def _emit(code: str) -> None:
+        nonlocal cur
+        if cur != code:
+            parts.append(code)
+            cur = code
+
+    for i in range(bar_width):
+        if i == time_pos:
+            parts.append(RESET + BOLD + MARKER + RESET)
+            cur = None  # force re-emit on next char
+        else:
+            _emit(color if i < filled else DIM)
+            parts.append(FILLED if i < filled else EMPTY)
+
+    parts.append(RESET)
+    return "".join(parts)
+
 
 def _draw_bar(label: str, pct: float, reset_dt: datetime | None, bar_width: int, window_s: int) -> str:
     """Return a single colored bar line (no trailing newline)."""
@@ -224,6 +264,7 @@ def _draw_bar(label: str, pct: float, reset_dt: datetime | None, bar_width: int,
     now_utc = datetime.now(timezone.utc)
 
     burn_ratio = None
+    elapsed_frac = None
     secs_left = None
     if reset_dt:
         secs_left = max(0.0, (reset_dt - now_utc).total_seconds())
@@ -231,26 +272,65 @@ def _draw_bar(label: str, pct: float, reset_dt: datetime | None, bar_width: int,
         if elapsed_frac >= 0.1:
             burn_ratio = pct / (elapsed_frac * 100.0)
 
-    filled = round(bar_width * pct / 100)
-    empty  = bar_width - filled
-
-    color = usage_color(pct, burn_ratio)
-    bar = color + FILLED * filled + DIM + EMPTY * empty + RESET
+    filled   = round(bar_width * pct / 100)
+    time_pos = round(bar_width * elapsed_frac) if elapsed_frac is not None else None
+    color    = usage_color(pct, burn_ratio)
+    bar      = _build_bar_str(bar_width, filled, color, time_pos)
 
     pct_str = f"{round(pct):3d}%"
 
     if reset_dt and secs_left is not None:
         rel  = _format_relative(secs_left)
         abso = _format_absolute(reset_dt)
-        reset_str = f"  {color}in {rel}{RESET} {DIM}({abso}){RESET}"
+        reset_str = f"  {TIME_COLOR}in {rel}{RESET} {DIM}({abso}){RESET}"
     else:
         reset_str = ""
 
     return f"{BOLD}{label}{RESET} {color}{BOLD}{pct_str}{RESET} {bar}{reset_str}"
 
+# ── State persistence ────────────────────────────────────────────────────────
+
+def _save_state(usage: dict | None, fetched_at: datetime | None) -> None:
+    """Persist usage + backoff state so the next run can resume without an immediate API call."""
+    if usage is None or fetched_at is None:
+        return
+    try:
+        STATE_PATH.write_text(json.dumps({
+            "saved_at":      fetched_at.isoformat(),
+            "backoff_until": _backoff_until,
+            "usage":         usage,
+        }))
+    except Exception:
+        pass
+
+
+def _load_state() -> tuple | None:
+    """Return (usage, saved_at_dt, initial_fetch_delay_s) or None if cache is absent/stale."""
+    try:
+        state     = json.loads(STATE_PATH.read_text())
+        saved_at  = datetime.fromisoformat(state["saved_at"])
+        usage     = state.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        age_s     = (datetime.now(timezone.utc) - saved_at).total_seconds()
+        # Restore backoff if it hasn't expired yet
+        backoff = float(state.get("backoff_until", 0))
+        if backoff > time.time():
+            global _backoff_until
+            _backoff_until = backoff
+        # Delay first fetch by however much of REFRESH_SECONDS is still remaining
+        delay = max(0.0, REFRESH_SECONDS - age_s)
+        return usage, saved_at, delay
+    except Exception:
+        return None
+
+
 # ── Render loop ───────────────────────────────────────────────────────────────
 
 _first_draw = True
+_last_render_args: tuple | None = None
+_last_line_count = 0
+_resize_pending = False
 
 def _clear_lines(n: int):
     """Move cursor up n lines and clear each."""
@@ -258,8 +338,9 @@ def _clear_lines(n: int):
     for _ in range(n - 1):
         sys.stdout.write("\033[1A\033[2K")
 
-def render(usage: dict | None, error: str | None):
-    global _first_draw
+def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
+    global _first_draw, _last_render_args, _last_line_count
+    _last_render_args = (usage, top_status, bottom_status)
 
     term_w = shutil.get_terminal_size((80, 24)).columns
 
@@ -269,11 +350,10 @@ def render(usage: dict | None, error: str | None):
 
     lines = []
 
-    if error:
-        msg = f"\033[31m{error}{RESET}"
-        lines.append(msg)
-        lines.append("")  # placeholder for 7d
-    elif usage:
+    if top_status:
+        lines.append(top_status)
+
+    if usage is not None:
         fh = usage.get("five_hour", {})
         sd = usage.get("seven_day", {})
 
@@ -286,12 +366,16 @@ def render(usage: dict | None, error: str | None):
         lines.append(_draw_bar("7d", sd_pct, sd_reset, bar_w, 7 * 86400))
     else:
         lines.append("Fetching…")
-        lines.append("")
+
+    if bottom_status:
+        lines.append(bottom_status)
 
     if not _first_draw:
-        _clear_lines(2)
+        _clear_lines(_last_line_count)
     else:
         _first_draw = False
+
+    _last_line_count = len(lines)
 
     for i, line in enumerate(lines):
         end = "\n" if i < len(lines) - 1 else ""
@@ -299,32 +383,88 @@ def render(usage: dict | None, error: str | None):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main():
-    signal.signal(signal.SIGINT, lambda *_: (print(), sys.exit(0)))
+def _interruptible_sleep(seconds: float):
+    """Sleep for `seconds`, re-rendering immediately on terminal resize."""
+    global _resize_pending
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if _resize_pending:
+            _resize_pending = False
+            if _last_render_args is not None:
+                render(*_last_render_args)
+        time.sleep(0.1)
 
-    last_usage = None
-    last_headers = None
+
+def main():
+    last_usage: dict | None = None
+    last_success_at: datetime | None = None
+
+    def _on_exit(*_):
+        _save_state(last_usage, last_success_at)
+        print()
+        sys.exit(0)
+
+    def _on_resize(*_):
+        global _resize_pending
+        _resize_pending = True
+
+    signal.signal(signal.SIGINT, _on_exit)
+    if hasattr(signal, "SIGWINCH"):
+        signal.signal(signal.SIGWINCH, _on_resize)
+
+    # Restore cached state so we don't hammer the API right after restart
+    cached = _load_state()
+    if cached is not None:
+        last_usage, last_success_at, initial_delay = cached
+    else:
+        initial_delay = 0.0
+
+    next_fetch_at   = time.time() + initial_delay
+    last_headers    = None
     last_header_fetch = 0.0
 
     while True:
         now = time.time()
+        err = None
 
-        # Refresh headers every 4 minutes (tokens live ~1h)
-        if now - last_header_fetch > 240:
-            headers, err = load_auth_headers()
+        if now >= next_fetch_at:
+            # Refresh headers every 4 minutes (tokens live ~1h)
+            if now - last_header_fetch > 240:
+                new_headers, header_err = load_auth_headers()
+                if header_err is None:
+                    last_headers = new_headers
+                    last_header_fetch = now
+                else:
+                    err = header_err
+
+            if err is None:
+                data, fetch_err = fetch_usage(last_headers)
+                err = fetch_err
+                if data is not None:
+                    last_usage = data
+                    last_success_at = datetime.now(timezone.utc)
+
+            next_fetch_at = time.time() + REFRESH_SECONDS
+
+        # ── single status line above bars ───────────────────────────────────
+        if last_success_at is not None:
+            age_seconds = time.time() - last_success_at.timestamp()
+            if age_seconds >= 60:
+                age_str = _format_relative(age_seconds)
+                status = f"{DIM}synced {age_str} ago ({_format_timestamp(last_success_at)}){RESET}"
+            else:
+                status = ""
             if err:
-                render(None, err)
-                time.sleep(REFRESH_SECONDS)
-                continue
-            last_headers = headers
-            last_header_fetch = now
+                status += f"  {RED}{err}{RESET}" if status else f"{RED}{err}{RESET}"
+        elif err:
+            status = f"{RED}{err}{RESET}"
+        else:
+            status = f"{DIM}Waiting for first successful fetch…{RESET}"
 
-        data, err = fetch_usage(last_headers)
-        if data:
-            last_usage = data
-        render(last_usage if not err else None, err if not last_usage else None)
-        sleep_s = 1 if _backoff_until > time.time() else REFRESH_SECONDS
-        time.sleep(sleep_s)
+        render(last_usage, top_status=status)
+
+        sleep_s = min(60, max(0.1, next_fetch_at - time.time()))
+        _interruptible_sleep(sleep_s)
 
 if __name__ == "__main__":
     main()
