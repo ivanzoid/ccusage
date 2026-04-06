@@ -348,8 +348,6 @@ def _load_state(refresh_seconds: int = REFRESH_SECONDS) -> tuple | None:
 _first_draw = True
 _last_render_args: tuple | None = None
 _last_line_count = 0
-_resize_pending = False
-
 def _clear_lines(n: int):
     """Move cursor up n lines and clear each."""
     sys.stdout.write("\r\033[2K")  # clear current line (cursor may be mid-line)
@@ -405,14 +403,9 @@ def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def _interruptible_sleep(seconds: float):
-    """Sleep for `seconds`, re-rendering immediately on terminal resize."""
-    global _resize_pending
+    """Sleep for `seconds`, waking early if a signal interrupts."""
     deadline = time.time() + seconds
     while time.time() < deadline:
-        if _resize_pending:
-            _resize_pending = False
-            if _last_render_args is not None:
-                render(*_last_render_args)
         time.sleep(0.1)
 
 
@@ -438,8 +431,8 @@ def main():
         sys.exit(0)
 
     def _on_resize(*_):
-        global _resize_pending
-        _resize_pending = True
+        if _last_render_args is not None:
+            render(*_last_render_args)
 
     signal.signal(signal.SIGINT, _on_exit)
     if hasattr(signal, "SIGWINCH"):
