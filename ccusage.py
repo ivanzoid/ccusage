@@ -165,7 +165,7 @@ def fetch_usage(headers: dict) -> tuple:
                 return resp.json(), None
             elif resp.status_code == 429:
                 api_wait = _parse_retry_after(resp)
-                if api_wait is not None:
+                if api_wait is not None and api_wait > 0:
                     duration = api_wait
                 else:
                     duration = min(300 * (2 ** _consecutive_429s), 3600)
