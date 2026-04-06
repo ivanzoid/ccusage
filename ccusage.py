@@ -184,9 +184,9 @@ def fetch_usage(headers: dict) -> tuple:
 
 def _format_relative(seconds: float) -> str:
     """Return human-readable relative duration, e.g. '2h 30m' or '5d 12h'."""
-    s = int(seconds)
-    if s <= 0:
+    if seconds <= 0:
         return "now"
+    s = max(1, int(seconds))
     days, s = divmod(s, 86400)
     hours, s = divmod(s, 3600)
     minutes = s // 60
