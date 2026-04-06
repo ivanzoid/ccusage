@@ -302,9 +302,6 @@ def render(usage: dict | None, error: str | None):
 def main():
     signal.signal(signal.SIGINT, lambda *_: (print(), sys.exit(0)))
 
-    print()  # blank line so clearing doesn't scroll
-    _clear_lines(1)
-
     last_usage = None
     last_headers = None
     last_header_fetch = 0.0
