@@ -3,13 +3,13 @@
 
 import json
 import platform
-import random
 import shutil
 import signal
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import requests
@@ -123,13 +123,37 @@ def load_auth_headers() -> tuple:
 _consecutive_429s = 0
 _backoff_until = 0.0
 
+def _parse_retry_after(resp) -> float | None:
+    """Return seconds to wait from a 429 response, or None if not specified."""
+    header = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
+    if header:
+        try:
+            return float(header)
+        except ValueError:
+            try:
+                dt = parsedate_to_datetime(header)
+                return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+            except Exception:
+                pass
+    try:
+        body = resp.json()
+        for path in [("retry_after",), ("error", "retry_after"), ("retryAfter",)]:
+            val = body
+            for key in path:
+                val = val.get(key) if isinstance(val, dict) else None
+            if val is not None:
+                return float(val)
+    except Exception:
+        pass
+    return None
+
 def fetch_usage(headers: dict) -> tuple:
     """Return (usage_dict, error_str)."""
     global _consecutive_429s, _backoff_until
 
     if time.time() < _backoff_until:
-        remaining = int(_backoff_until - time.time())
-        return None, f"Rate-limited — retry in {remaining}s"
+        remaining = _backoff_until - time.time()
+        return None, f"Rate-limited — retry in {_format_relative(remaining)}"
 
     url = f"{API_BASE}{USAGE_ENDPOINT}"
     for attempt in range(3):
@@ -140,10 +164,14 @@ def fetch_usage(headers: dict) -> tuple:
                 _backoff_until = 0.0
                 return resp.json(), None
             elif resp.status_code == 429:
-                duration = min(300 * (2 ** _consecutive_429s), 3600)
+                api_wait = _parse_retry_after(resp)
+                if api_wait is not None:
+                    duration = api_wait
+                else:
+                    duration = min(300 * (2 ** _consecutive_429s), 3600)
+                    _consecutive_429s += 1
                 _backoff_until = time.time() + duration
-                _consecutive_429s += 1
-                return None, f"Rate-limited (429) — retry in {duration}s"
+                return None, f"Rate-limited — retry in {_format_relative(duration)}"
             elif resp.status_code == 401:
                 return None, "Unauthorized (401) — run 'claude' to re-authenticate"
             else:
@@ -297,7 +325,8 @@ def main():
         if data:
             last_usage = data
         render(last_usage if not err else None, err if not last_usage else None)
-        time.sleep(REFRESH_SECONDS)
+        sleep_s = 1 if _backoff_until > time.time() else REFRESH_SECONDS
+        time.sleep(sleep_s)
 
 if __name__ == "__main__":
     main()
