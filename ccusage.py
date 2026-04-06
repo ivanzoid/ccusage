@@ -290,7 +290,7 @@ def _draw_bar(label: str, pct: float, reset_dt: datetime | None, bar_width: int,
     if reset_dt:
         secs_left = max(0.0, (reset_dt - now_utc).total_seconds())
         elapsed_frac = max(0.0, (window_s - secs_left) / window_s)
-        if elapsed_frac >= 0.1:
+        if elapsed_frac >= 0.02:
             burn_ratio = pct / (elapsed_frac * 100.0)
 
     filled   = round(bar_width * pct / 100)
