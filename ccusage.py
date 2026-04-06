@@ -254,7 +254,8 @@ _first_draw = True
 
 def _clear_lines(n: int):
     """Move cursor up n lines and clear each."""
-    for _ in range(n):
+    sys.stdout.write("\r\033[2K")  # clear current line (cursor may be mid-line)
+    for _ in range(n - 1):
         sys.stdout.write("\033[1A\033[2K")
 
 def render(usage: dict | None, error: str | None):
