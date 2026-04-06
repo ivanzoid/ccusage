@@ -20,7 +20,8 @@ class TestFormatRelative(unittest.TestCase):
         self.assertEqual(_format_relative(-5), "now")
 
     def test_sub_minute(self):
-        self.assertEqual(_format_relative(30), "<1m")
+        self.assertEqual(_format_relative(30), "30s")
+        self.assertEqual(_format_relative(1), "1s")
 
     def test_minutes_only(self):
         self.assertEqual(_format_relative(90), "1m")

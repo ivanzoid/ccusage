@@ -194,7 +194,7 @@ def _format_relative(seconds: float) -> str:
         return f"{days}d{hours}h" if hours else f"{days}d"
     if hours:
         return f"{hours}h{minutes}m" if minutes else f"{hours}h"
-    return f"{minutes}m" if minutes else "<1m"
+    return f"{minutes}m" if minutes else (f"{s}s" if s else "now")
 
 def _format_absolute(reset_dt: datetime) -> str:
     """Return absolute time: HH:MM if today, else 'Mon HH:MM'."""
