@@ -1,5 +1,10 @@
 # ccusage
 
+## Instructions
+
+- When asked to commit, do NOT push automatically. Commit only, then ask the user if they want to push.
+
+
 Minimal terminal monitor for Claude Code rate-limit usage.
 
 ## What it does
