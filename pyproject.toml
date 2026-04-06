@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ccusage"
+version = "1.0.0"
+description = "Minimal Claude Code rate-limit monitor for the terminal"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["requests>=2.25"]
+
+[project.scripts]
+ccusage = "ccusage:main"
+
+[tool.setuptools]
+py-modules = ["ccusage"]

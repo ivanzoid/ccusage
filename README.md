@@ -28,17 +28,19 @@ Draws two live-updating bars — 5-hour and 7-day usage — that fill your termi
 ## Install
 
 ```bash
-git clone https://github.com/ivanzoid/ccusage.git
-cd ccusage
-pip install requests   # if not already present
+pipx install git+https://github.com/ivanzoid/ccusage.git
+```
+
+Or without pipx:
+
+```bash
+pip install git+https://github.com/ivanzoid/ccusage.git
 ```
 
 ## Run
 
 ```bash
-python ccusage.py
-# or
-chmod +x ccusage.py && ./ccusage.py
+ccusage
 ```
 
 Press `Ctrl+C` to exit.
