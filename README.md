@@ -5,19 +5,23 @@ Minimal Claude Code rate-limit monitor for the terminal.
 Draws two live-updating bars — 5-hour and 7-day usage — that fill your terminal width and warm in color as consumption grows.
 
 ```
-5h   3.2% ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  in 4h 51m (14:30)
-7d  18.7% ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  in 5d 12h (Thu 14:30)
+5h   3% ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  in 4h51m (14:30)
+7d  18% ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  in 5d12h (Thu 14:30)
 ```
 
 ## Color scheme
 
-| Utilization | Color  |
-|-------------|--------|
-| 0 – 40 %    | Cyan   |
-| 40 – 65 %   | Green  |
-| 65 – 80 %   | Yellow |
-| 80 – 92 %   | Orange |
-| 92 %+       | Red    |
+Color is based on **burn rate** — how fast you're consuming the limit relative to the time elapsed in the window. This catches "you're already at 50% with 4 days left in the week" situations that raw utilization misses.
+
+| Burn ratio (actual / expected) | Color  |
+|-------------------------------|--------|
+| < 0.5×                        | Cyan   |
+| 0.5 – 1.0×                    | Green  |
+| 1.0 – 1.5×                    | Yellow |
+| 1.5 – 2.0×                    | Orange |
+| 2.0×+                         | Red    |
+
+Falls back to raw utilization thresholds during the first 10% of a window (too early to judge pace).
 
 ## Requirements
 
