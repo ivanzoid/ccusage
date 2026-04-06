@@ -50,7 +50,10 @@ TIME_COLOR = _color(120, 160, 220)   # fixed color for reset countdowns
 DIM        = "\033[2m"
 
 def usage_color(pct: float, burn_ratio: float | None = None) -> str:
-    """Color by burn rate (actual/expected) when available, else raw utilisation."""
+    """Color by burn rate (actual/expected) when available, else raw utilisation.
+    At extreme utilisation (>=95%) always returns RED — you're effectively blocked."""
+    if pct >= 95:
+        return RED
     if burn_ratio is not None:
         if burn_ratio >= 2.0:
             return RED
@@ -213,7 +216,7 @@ def _format_relative(seconds: float) -> str:
         return f"{days}d{hours}h" if hours else f"{days}d"
     if hours:
         return f"{hours}h{minutes}m" if minutes else f"{hours}h"
-    return f"{minutes}m" if minutes else (f"{s}s" if s else "now")
+    return f"{minutes}m" if minutes else "1m"
 
 def _fmt_time(dt: datetime) -> str:
     """Format time component respecting the system 12/24h preference."""
