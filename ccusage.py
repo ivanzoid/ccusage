@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code usage monitor — shows 5h and 7d rate limit bars."""
 
+import argparse
 import json
 import platform
 import shutil
@@ -20,7 +21,7 @@ CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 STATE_PATH        = Path.home() / ".ccusage_cache.json"
 API_BASE = "https://api.anthropic.com"
 USAGE_ENDPOINT = "/api/oauth/usage"
-REFRESH_SECONDS = 180
+REFRESH_SECONDS = 120
 
 # ── ANSI helpers ─────────────────────────────────────────────────────────────
 
@@ -304,7 +305,7 @@ def _save_state(usage: dict | None, fetched_at: datetime | None) -> None:
         pass
 
 
-def _load_state() -> tuple | None:
+def _load_state(refresh_seconds: int = REFRESH_SECONDS) -> tuple | None:
     """Return (usage, saved_at_dt, initial_fetch_delay_s) or None if cache is absent/stale."""
     try:
         state     = json.loads(STATE_PATH.read_text())
@@ -318,8 +319,8 @@ def _load_state() -> tuple | None:
         if backoff > time.time():
             global _backoff_until
             _backoff_until = backoff
-        # Delay first fetch by however much of REFRESH_SECONDS is still remaining
-        delay = max(0.0, REFRESH_SECONDS - age_s)
+        # Delay first fetch by however much of refresh_seconds is still remaining
+        delay = max(0.0, refresh_seconds - age_s)
         return usage, saved_at, delay
     except Exception:
         return None
@@ -396,6 +397,17 @@ def _interruptible_sleep(seconds: float):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Claude Code rate-limit monitor")
+    parser.add_argument(
+        "-i", "--interval",
+        type=int,
+        default=REFRESH_SECONDS,
+        metavar="SECONDS",
+        help=f"Poll interval in seconds (default: {REFRESH_SECONDS})",
+    )
+    args = parser.parse_args()
+    refresh_seconds = args.interval
+
     last_usage: dict | None = None
     last_success_at: datetime | None = None
 
@@ -413,7 +425,7 @@ def main():
         signal.signal(signal.SIGWINCH, _on_resize)
 
     # Restore cached state so we don't hammer the API right after restart
-    cached = _load_state()
+    cached = _load_state(refresh_seconds)
     if cached is not None:
         last_usage, last_success_at, initial_delay = cached
     else:
@@ -444,7 +456,7 @@ def main():
                     last_usage = data
                     last_success_at = datetime.now(timezone.utc)
 
-            next_fetch_at = time.time() + REFRESH_SECONDS
+            next_fetch_at = time.time() + refresh_seconds
 
         # ── single status line above bars ───────────────────────────────────
         if last_success_at is not None:

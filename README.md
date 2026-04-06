@@ -57,7 +57,7 @@ Press `Ctrl+C` to exit.
 Reads OAuth credentials from `~/.claude/.credentials.json` (written by the `claude` CLI).  
 On macOS, falls back to the system Keychain if the file is missing or the token is expired.
 
-Polls `GET https://api.anthropic.com/api/oauth/usage` every 3 minutes and redraws the lines in-place. No databases, no config files, no background processes.
+Polls `GET https://api.anthropic.com/api/oauth/usage` every 2 minutes by default (configurable with `-i SECONDS`) and redraws the lines in-place. No databases, no config files, no background processes.
 
 On exit (`Ctrl+C`), saves the last fetched data and fetch time to `~/.ccusage_cache.json`. On next start, that data is shown immediately and the next API call is delayed so the 3-minute interval is respected across restarts.
 
