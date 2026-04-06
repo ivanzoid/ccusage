@@ -36,7 +36,18 @@ ORANGE = _color(255, 140, 0)
 RED    = _color(220, 50, 50)
 DIM    = "\033[2m"
 
-def usage_color(pct: float) -> str:
+def usage_color(pct: float, burn_ratio: float | None = None) -> str:
+    """Color by burn rate (actual/expected) when available, else raw utilisation."""
+    if burn_ratio is not None:
+        if burn_ratio >= 2.0:
+            return RED
+        if burn_ratio >= 1.5:
+            return ORANGE
+        if burn_ratio >= 1.0:
+            return YELLOW
+        if burn_ratio >= 0.5:
+            return GREEN
+        return CYAN
     if pct >= 92:
         return RED
     if pct >= 80:
@@ -155,9 +166,9 @@ def _format_relative(seconds: float) -> str:
     hours, s = divmod(s, 3600)
     minutes = s // 60
     if days:
-        return f"{days}d {hours}h" if hours else f"{days}d"
+        return f"{days}d{hours}h" if hours else f"{days}d"
     if hours:
-        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+        return f"{hours}h{minutes}m" if minutes else f"{hours}h"
     return f"{minutes}m" if minutes else "<1m"
 
 def _format_absolute(reset_dt: datetime) -> str:
@@ -182,22 +193,31 @@ def _parse_reset(resets_at: str) -> datetime | None:
 FILLED = "█"
 EMPTY  = "░"
 
-def _draw_bar(label: str, pct: float, reset_dt: datetime | None, bar_width: int) -> str:
+def _draw_bar(label: str, pct: float, reset_dt: datetime | None, bar_width: int, window_s: int) -> str:
     """Return a single colored bar line (no trailing newline)."""
     pct = max(0.0, min(pct, 100.0))
+    now_utc = datetime.now(timezone.utc)
+
+    burn_ratio = None
+    secs_left = None
+    if reset_dt:
+        secs_left = max(0.0, (reset_dt - now_utc).total_seconds())
+        elapsed_frac = max(0.0, (window_s - secs_left) / window_s)
+        if elapsed_frac >= 0.1:
+            burn_ratio = pct / (elapsed_frac * 100.0)
+
     filled = round(bar_width * pct / 100)
     empty  = bar_width - filled
 
-    color = usage_color(pct)
+    color = usage_color(pct, burn_ratio)
     bar = color + FILLED * filled + DIM + EMPTY * empty + RESET
 
-    pct_str = f"{pct:5.1f}%"
+    pct_str = f"{round(pct):3d}%"
 
-    if reset_dt:
-        secs = (reset_dt - datetime.now(timezone.utc)).total_seconds()
-        rel  = _format_relative(secs)
+    if reset_dt and secs_left is not None:
+        rel  = _format_relative(secs_left)
         abso = _format_absolute(reset_dt)
-        reset_str = f"  in {rel} ({abso})"
+        reset_str = f"  {color}in {rel}{RESET} {DIM}({abso}){RESET}"
     else:
         reset_str = ""
 
@@ -217,8 +237,8 @@ def render(usage: dict | None, error: str | None):
 
     term_w = shutil.get_terminal_size((80, 24)).columns
 
-    # Fixed overhead: label(2) + space(1) + pct(7) + space(1) + reset(~22 max)
-    overhead = 2 + 1 + 7 + 1 + 22  # label + pct + bar-gap + reset
+    # Fixed overhead: label(2) + space(1) + pct(4) + space(1) + reset(~22 max)
+    overhead = 2 + 1 + 4 + 1 + 22  # label + pct + bar-gap + reset
     bar_w = max(10, term_w - overhead)
 
     lines = []
@@ -236,8 +256,8 @@ def render(usage: dict | None, error: str | None):
         fh_reset = _parse_reset(fh.get("resets_at", ""))
         sd_reset = _parse_reset(sd.get("resets_at", ""))
 
-        lines.append(_draw_bar("5h", fh_pct, fh_reset, bar_w))
-        lines.append(_draw_bar("7d", sd_pct, sd_reset, bar_w))
+        lines.append(_draw_bar("5h", fh_pct, fh_reset, bar_w, 5 * 3600))
+        lines.append(_draw_bar("7d", sd_pct, sd_reset, bar_w, 7 * 86400))
     else:
         lines.append("Fetching…")
         lines.append("")
