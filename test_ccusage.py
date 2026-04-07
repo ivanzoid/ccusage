@@ -14,6 +14,8 @@ from ccusage import (
     _build_bar_str,
     _save_state,
     _load_state,
+    _strip_ansi,
+    _visual_rows,
     fetch_usage,
     usage_color,
     _draw_bar,
@@ -31,8 +33,8 @@ class TestFormatRelative(unittest.TestCase):
         self.assertEqual(_format_relative(-5), "now")
 
     def test_sub_minute(self):
-        self.assertEqual(_format_relative(30), "30s")
-        self.assertEqual(_format_relative(1), "1s")
+        self.assertEqual(_format_relative(30), "1m")
+        self.assertEqual(_format_relative(1), "1m")
 
     def test_minutes_only(self):
         self.assertEqual(_format_relative(90), "1m")
@@ -108,8 +110,12 @@ class TestUsageColor(unittest.TestCase):
         self.assertEqual(usage_color(50, burn_ratio=10.0), RED)
 
     def test_burn_overrides_raw(self):
-        # High raw pct but low burn_ratio → should be cyan not red
-        self.assertEqual(usage_color(95, burn_ratio=0.1), CYAN)
+        # High raw pct but low burn_ratio → cyan, unless >=95% which forces red
+        self.assertEqual(usage_color(90, burn_ratio=0.1), CYAN)
+
+    def test_extreme_utilization_always_red(self):
+        # >=95% forces RED regardless of burn_ratio
+        self.assertEqual(usage_color(95, burn_ratio=0.1), RED)
 
 
 class TestDrawBar(unittest.TestCase):
@@ -409,6 +415,112 @@ class TestRender(unittest.TestCase):
         # Wider terminal → more bar characters
         bar_chars = lambda s: s.count("█") + s.count("░")
         self.assertGreater(bar_chars(out120), bar_chars(out40))
+
+
+class TestStripAnsi(unittest.TestCase):
+    def test_plain_text_unchanged(self):
+        self.assertEqual(_strip_ansi("hello world"), "hello world")
+
+    def test_removes_color_codes(self):
+        self.assertEqual(_strip_ansi(f"{RED}error{RESET}"), "error")
+
+    def test_removes_bold_dim(self):
+        self.assertEqual(_strip_ansi(f"{BOLD}hi{DIM}there{RESET}"), "hithere")
+
+    def test_empty_string(self):
+        self.assertEqual(_strip_ansi(""), "")
+
+
+class TestVisualRows(unittest.TestCase):
+    def test_short_line_one_row(self):
+        self.assertEqual(_visual_rows("hello", 80), 1)
+
+    def test_empty_line_one_row(self):
+        self.assertEqual(_visual_rows("", 80), 1)
+
+    def test_exact_width_one_row(self):
+        self.assertEqual(_visual_rows("x" * 80, 80), 1)
+
+    def test_one_over_wraps(self):
+        self.assertEqual(_visual_rows("x" * 81, 80), 2)
+
+    def test_double_width(self):
+        self.assertEqual(_visual_rows("x" * 160, 80), 2)
+
+    def test_ansi_codes_not_counted(self):
+        # 10 visible chars with ANSI wrapping — should be 1 row on 80-wide terminal
+        line = f"{RED}{'x' * 10}{RESET}"
+        self.assertEqual(_visual_rows(line, 80), 1)
+
+    def test_long_status_with_ansi_wraps(self):
+        # Simulate the real bug: a long status line with error that exceeds terminal width
+        status = f"{DIM}synced 8h34m ago (04:37){RESET}  {RED}Token expired — run 'claude' to refresh{RESET}"
+        visible = _strip_ansi(status)
+        # On a 50-column terminal this should wrap
+        self.assertEqual(_visual_rows(status, 50), 2)
+        # On a 120-column terminal it fits in one row
+        self.assertEqual(_visual_rows(status, 120), 1)
+
+
+class TestRenderClearsWrappedLines(unittest.TestCase):
+    """Verify render() tracks visual rows so wrapped lines get fully cleared."""
+
+    def setUp(self):
+        ccusage._first_draw = True
+        ccusage._last_visual_rows = 0
+
+    def _render_and_capture(self, usage, top_status="", term_w=80):
+        import io
+        buf = io.StringIO()
+        with patch("sys.stdout", buf), \
+             patch("shutil.get_terminal_size", return_value=MagicMock(columns=term_w)):
+            ccusage.render(usage, top_status=top_status)
+        return buf.getvalue()
+
+    def test_visual_rows_tracked_with_wrapping_status(self):
+        """A status line wider than the terminal should increase _last_visual_rows."""
+        usage = {
+            "five_hour": {"utilization": 10.0, "resets_at": ""},
+            "seven_day": {"utilization": 20.0, "resets_at": ""},
+        }
+        # Short status, narrow terminal — no wrapping: 3 logical = 3 visual
+        self._render_and_capture(usage, top_status="ok", term_w=80)
+        self.assertEqual(ccusage._last_visual_rows, 3)
+
+    def test_visual_rows_increases_with_long_status(self):
+        """A wrapping status line should count as 2+ visual rows."""
+        usage = {
+            "five_hour": {"utilization": 10.0, "resets_at": ""},
+            "seven_day": {"utilization": 20.0, "resets_at": ""},
+        }
+        long_status = "synced 8h34m ago (04:37)  Token expired — run 'claude' to refresh"
+        # On a 40-col terminal, this ~67-char line wraps to 2 visual rows
+        # So total = 2 (status) + 1 (5h bar) + 1 (7d bar) = 4
+        self._render_and_capture(usage, top_status=long_status, term_w=40)
+        self.assertGreater(ccusage._last_visual_rows, 3)
+
+    def test_second_render_emits_enough_clear_escapes(self):
+        """On re-render with a wrapping status, enough \\033[1A sequences are emitted."""
+        usage = {
+            "five_hour": {"utilization": 10.0, "resets_at": ""},
+            "seven_day": {"utilization": 20.0, "resets_at": ""},
+        }
+        long_status = "synced 8h34m ago (04:37)  Token expired — run 'claude' to refresh"
+        # First render (sets _last_visual_rows)
+        self._render_and_capture(usage, top_status=long_status, term_w=40)
+        saved_rows = ccusage._last_visual_rows
+        self.assertGreater(saved_rows, 3)
+
+        # Second render — should clear saved_rows visual rows
+        import io
+        buf = io.StringIO()
+        with patch("sys.stdout", buf), \
+             patch("shutil.get_terminal_size", return_value=MagicMock(columns=40)):
+            ccusage.render(usage, top_status=long_status)
+        output = buf.getvalue()
+        # _clear_lines emits 1 \r\033[2K + (n-1) \033[1A\033[2K
+        move_up_count = output.count("\033[1A")
+        self.assertEqual(move_up_count, saved_rows - 1)
 
 
 class TestBuildBarStr(unittest.TestCase):

@@ -377,7 +377,7 @@ def _clear_lines(n: int):
         sys.stdout.write("\033[1A\033[2K")
 
 def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
-    global _first_draw, _last_render_args, _last_line_count
+    global _first_draw, _last_render_args, _last_visual_rows
     _last_render_args = (usage, top_status, bottom_status)
 
     term_w = shutil.get_terminal_size((80, 24)).columns

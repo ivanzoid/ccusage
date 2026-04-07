@@ -3,6 +3,7 @@
 ## Instructions
 
 - When asked to commit, do NOT push automatically. Commit only, then ask the user if they want to push.
+- Always run tests before committing. If any tests fail, fix them — they are never "pre-existing" failures; you are the one changing the code.
 
 
 Minimal terminal monitor for Claude Code rate-limit usage.
