@@ -166,7 +166,7 @@ class TestDrawBar(unittest.TestCase):
         self.assertIn(CYAN, line)
 
     def test_burn_ratio_skipped_early_in_window(self):
-        # 1 min elapsed of 5h → elapsed_frac ≈ 0.003 < 0.1 → fallback to raw pct
+        # 1 min elapsed of 5h → elapsed_frac ≈ 0.003 < 0.02 → fallback to raw pct
         # pct=80 → raw → ORANGE
         reset_dt = datetime.now(timezone.utc) + timedelta(hours=4, minutes=59)
         line = _draw_bar("5h", 80.0, reset_dt, 20, 5 * 3600)

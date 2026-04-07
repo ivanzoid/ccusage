@@ -24,7 +24,7 @@ Color is based on **burn rate** — how fast you're consuming the limit relative
 | 1.5 – 2.0×                    | Orange |
 | 2.0×+                         | Red    |
 
-Falls back to raw utilization thresholds during the first 10% of a window (too early to judge pace).
+Falls back to raw utilization thresholds during the first 2% of a window (too early to judge pace).
 
 ## Requirements
 
