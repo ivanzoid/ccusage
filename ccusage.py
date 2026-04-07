@@ -374,7 +374,7 @@ def _clear_lines(n: int):
     """Move cursor up n visual rows and clear each."""
     sys.stdout.write("\r\033[2K")  # clear current line (cursor may be mid-line)
     for _ in range(n - 1):
-        sys.stdout.write("\033[1A\033[2K")
+        sys.stdout.write("\033[F\033[2K")
 
 def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
     global _first_draw, _last_render_args, _last_visual_rows
