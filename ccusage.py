@@ -4,6 +4,7 @@
 import argparse
 import json
 import locale
+import os
 import platform
 import shutil
 import signal
@@ -18,10 +19,14 @@ import requests
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
-STATE_PATH        = Path.home() / ".ccusage_cache.json"
-API_BASE = "https://api.anthropic.com"
-USAGE_ENDPOINT = "/api/oauth/usage"
+CREDENTIALS_PATH = Path(
+    os.getenv("CCUSAGE_CREDENTIALS_PATH", str(Path.home() / ".claude" / ".credentials.json"))
+)
+STATE_PATH = Path(
+    os.getenv("CCUSAGE_STATE_PATH", str(Path.home() / ".ccusage_cache.json"))
+)
+API_BASE = os.getenv("CCUSAGE_API_BASE", "https://api.anthropic.com")
+USAGE_ENDPOINT = os.getenv("CCUSAGE_USAGE_ENDPOINT", "/api/oauth/usage")
 REFRESH_SECONDS = 120
 
 def _detect_12h() -> bool:
@@ -213,10 +218,17 @@ def _format_relative(seconds: float) -> str:
     hours, s = divmod(s, 3600)
     minutes = s // 60
     if days:
-        return f"{days}d{hours}h" if hours else f"{days}d"
+        return f"{days}d {hours}h" if hours else f"{days}d"
     if hours:
-        return f"{hours}h{minutes}m" if minutes else f"{hours}h"
+        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
     return f"{minutes}m" if minutes else "1m"
+
+def _dim_separators(text: str, active_color: str = "") -> str:
+    """Replace spaces between time units with a dim underscore separator."""
+    if " " not in text:
+        return text
+    sep = f"{DIM}_{RESET}{active_color}"
+    return text.replace(" ", sep)
 
 def _fmt_time(dt: datetime) -> str:
     """Format time component respecting the system 12/24h preference."""
@@ -301,7 +313,7 @@ def _draw_bar(label: str, pct: float, reset_dt: datetime | None, bar_width: int,
     pct_str = f"{round(pct):3d}%"
 
     if reset_dt and secs_left is not None:
-        rel  = _format_relative(secs_left)
+        rel  = _dim_separators(_format_relative(secs_left), TIME_COLOR)
         abso = _format_absolute(reset_dt)
         reset_str = f"  {TIME_COLOR}in {rel}{RESET} {DIM}({abso}){RESET}"
     else:
@@ -350,13 +362,26 @@ def _load_state(refresh_seconds: int = REFRESH_SECONDS) -> tuple | None:
 
 _last_render_args: tuple | None = None
 _resize_pending = False
-_render_anchor_set = False
+
+def _strip_ansi(s: str) -> str:
+    """Remove ANSI escape sequences to get visible text width."""
+    import re
+    return re.sub(r"\033\[[0-9;]*m", "", s)
+
+def _visual_rows(line: str, term_w: int) -> int:
+    """Number of visual rows a line occupies (>=1), accounting for wrapping."""
+    w = len(_strip_ansi(line))
+    if w == 0:
+        return 1
+    return max(1, (w + term_w - 1) // term_w)
 
 def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
-    global _last_render_args, _render_anchor_set
+    global _last_render_args
     _last_render_args = (usage, top_status, bottom_status)
 
-    term_w = shutil.get_terminal_size((80, 24)).columns
+    term_size = shutil.get_terminal_size((80, 24))
+    term_w = term_size.columns
+    term_h = term_size.lines
 
     # Fixed overhead: label(2) + space(1) + pct(4) + space(1) + reset + safety(1)
     # reset max: 24h "  in 1d 2h (Mon 23:59)" = 22, 12h "  in 1d 2h (Mon 12:30 PM)" = 25
@@ -387,11 +412,11 @@ def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
     if bottom_status:
         lines.append(bottom_status)
 
-    if _render_anchor_set:
-        sys.stdout.write("\033[u\033[J")
-    else:
-        sys.stdout.write("\033[s")
-        _render_anchor_set = True
+    total_visual = sum(_visual_rows(line, term_w) for line in lines)
+    start_row = max(1, term_h - total_visual + 1)
+    # Reposition and repaint from the calculated start row each frame so
+    # variable line heights don't leave stale blank rows below the bars.
+    sys.stdout.write(f"\033[{start_row};1H\033[J")
 
     for i, line in enumerate(lines):
         end = "\n" if i < len(lines) - 1 else ""
@@ -477,7 +502,7 @@ def main():
         if last_success_at is not None:
             age_seconds = time.time() - last_success_at.timestamp()
             if age_seconds >= 60:
-                age_str = _format_relative(age_seconds)
+                age_str = _dim_separators(_format_relative(age_seconds), DIM)
                 status = f"{DIM}synced {age_str} ago ({_format_timestamp(last_success_at)}){RESET}"
             else:
                 status = ""

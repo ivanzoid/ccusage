@@ -1,6 +1,7 @@
 """Tests for ccusage.py"""
 
 import json
+import os
 import time
 import unittest
 from datetime import datetime, timezone, timedelta
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import ccusage
 from ccusage import (
     _format_relative,
+    _dim_separators,
     _format_absolute,
     _parse_retry_after,
     _build_bar_str,
@@ -43,7 +45,7 @@ class TestFormatRelative(unittest.TestCase):
         self.assertEqual(_format_relative(7200), "2h")
 
     def test_hours_and_minutes(self):
-        self.assertEqual(_format_relative(7380), "2h3m")
+        self.assertEqual(_format_relative(7380), "2h 3m")
 
     def test_hours_suppresses_zero_minutes(self):
         self.assertEqual(_format_relative(3600), "1h")
@@ -53,16 +55,28 @@ class TestFormatRelative(unittest.TestCase):
         self.assertEqual(_format_relative(86400 * 2), "2d")
 
     def test_days_and_hours(self):
-        self.assertEqual(_format_relative(90000), "1d1h")
+        self.assertEqual(_format_relative(90000), "1d 1h")
 
     def test_days_suppresses_zero_hours(self):
         self.assertEqual(_format_relative(86400 * 3), "3d")
 
-    def test_no_spaces(self):
-        result = _format_relative(7380)   # "2h3m"
-        self.assertNotIn(" ", result)
-        result = _format_relative(90000)  # "1d1h"
-        self.assertNotIn(" ", result)
+    def test_combined_units_include_spaces(self):
+        self.assertIn(" ", _format_relative(7380))
+        self.assertIn(" ", _format_relative(90000))
+
+
+class TestDimSeparators(unittest.TestCase):
+    def test_no_change_for_single_unit(self):
+        self.assertEqual(_dim_separators("59m"), "59m")
+
+    def test_replaces_space_with_dim_underscore(self):
+        styled = _dim_separators("1h 54m", TIME_COLOR)
+        self.assertIn(f"{DIM}_{RESET}{TIME_COLOR}", styled)
+        self.assertNotIn("1h 54m", styled)
+
+    def test_restores_active_color_after_separator(self):
+        styled = _dim_separators("2d 19h", DIM)
+        self.assertIn(f"{DIM}_{RESET}{DIM}", styled)
 
 
 class TestUsageColor(unittest.TestCase):
@@ -188,6 +202,11 @@ class TestDrawBar(unittest.TestCase):
         line = _draw_bar("5h", 50.0, reset_dt, 20, 5 * 3600)
         self.assertIn(TIME_COLOR, line)
         self.assertIn("in ", line)
+
+    def test_reset_str_uses_dim_underscore_between_units(self):
+        reset_dt = datetime.now(timezone.utc) + timedelta(hours=2, minutes=5)
+        line = _draw_bar("5h", 50.0, reset_dt, 20, 5 * 3600)
+        self.assertIn(f"{DIM}_{RESET}{TIME_COLOR}", line)
 
 
 class TestParseRetryAfter(unittest.TestCase):
@@ -407,48 +426,47 @@ class TestRender(unittest.TestCase):
             "five_hour": {"utilization": 50.0, "resets_at": ""},
             "seven_day": {"utilization": 20.0, "resets_at": ""},
         }
-        with patch("shutil.get_terminal_size", return_value=MagicMock(columns=40)):
+        with patch("shutil.get_terminal_size", return_value=os.terminal_size((40, 24))):
             out40 = self._capture_render(usage)
-        ccusage._render_anchor_set = False
-        with patch("shutil.get_terminal_size", return_value=MagicMock(columns=120)):
+        with patch("shutil.get_terminal_size", return_value=os.terminal_size((120, 24))):
             out120 = self._capture_render(usage)
         # Wider terminal → more bar characters
         bar_chars = lambda s: s.count("█") + s.count("░")
         self.assertGreater(bar_chars(out120), bar_chars(out40))
 
 class TestRenderRepaint(unittest.TestCase):
-    """Verify render() uses a stable cursor anchor for repainting."""
+    """Verify render() repositions from terminal bottom each frame."""
 
     def setUp(self):
-        ccusage._render_anchor_set = False
         ccusage._last_render_args = None
 
-    def _render_and_capture(self, usage, top_status="", bottom_status="", term_w=80):
+    def _render_and_capture(self, usage, top_status="", bottom_status="", term_w=80, term_h=24):
         import io
         buf = io.StringIO()
         with patch("sys.stdout", buf), \
-             patch("shutil.get_terminal_size", return_value=MagicMock(columns=term_w)):
+             patch("shutil.get_terminal_size", return_value=os.terminal_size((term_w, term_h))):
             ccusage.render(usage, top_status=top_status, bottom_status=bottom_status)
         return buf.getvalue()
 
-    def test_first_render_saves_cursor_once(self):
+    def test_first_render_positions_block_from_bottom(self):
         usage = {
             "five_hour": {"utilization": 10.0, "resets_at": ""},
             "seven_day": {"utilization": 20.0, "resets_at": ""},
         }
-        output = self._render_and_capture(usage, top_status="ok", term_w=40)
-        self.assertTrue(output.startswith("\033[s"))
-        self.assertTrue(ccusage._render_anchor_set)
+        # top + 2 bars => 3 visual rows; on 5-line terminal start row should be 3
+        output = self._render_and_capture(usage, top_status="ok", term_w=40, term_h=5)
+        self.assertTrue(output.startswith("\033[3;1H\033[J"))
 
-    def test_second_render_restores_cursor_and_clears_screen(self):
+    def test_second_render_recalculates_start_row(self):
         usage = {
             "five_hour": {"utilization": 10.0, "resets_at": ""},
             "seven_day": {"utilization": 20.0, "resets_at": ""},
         }
         long_status = "synced 8h34m ago (04:37)  Token expired — run 'claude' to refresh"
-        self._render_and_capture(usage, top_status=long_status, term_w=40)
-        output = self._render_and_capture(usage, top_status="ok", bottom_status="warn", term_w=40)
-        self.assertTrue(output.startswith("\033[u\033[J"))
+        self._render_and_capture(usage, top_status=long_status, term_w=40, term_h=5)
+        # top + 2 bars + bottom => 4 visual rows; on 5-line terminal start row should be 2
+        output = self._render_and_capture(usage, top_status="ok", bottom_status="warn", term_w=40, term_h=5)
+        self.assertTrue(output.startswith("\033[2;1H\033[J"))
         self.assertIn("warn", output)
 
 
