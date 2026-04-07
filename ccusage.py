@@ -351,6 +351,7 @@ def _load_state(refresh_seconds: int = REFRESH_SECONDS) -> tuple | None:
 _first_draw = True
 _last_render_args: tuple | None = None
 _last_visual_rows = 0
+_resize_pending = False
 
 _ANSI_RE = None
 def _strip_ansi(s: str) -> str:
@@ -428,8 +429,12 @@ def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
 
 def _interruptible_sleep(seconds: float):
     """Sleep for `seconds`, waking early if a signal interrupts."""
+    global _resize_pending
     deadline = time.time() + seconds
     while time.time() < deadline:
+        if _resize_pending:
+            _resize_pending = False
+            return
         time.sleep(0.1)
 
 
@@ -455,8 +460,8 @@ def main():
         sys.exit(0)
 
     def _on_resize(*_):
-        if _last_render_args is not None:
-            render(*_last_render_args)
+        global _resize_pending
+        _resize_pending = True
 
     signal.signal(signal.SIGINT, _on_exit)
     if hasattr(signal, "SIGWINCH"):
