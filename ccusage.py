@@ -348,37 +348,12 @@ def _load_state(refresh_seconds: int = REFRESH_SECONDS) -> tuple | None:
 
 # ── Render loop ───────────────────────────────────────────────────────────────
 
-_first_draw = True
 _last_render_args: tuple | None = None
-_last_visual_rows = 0
 _resize_pending = False
-
-_ANSI_RE = None
-def _strip_ansi(s: str) -> str:
-    """Remove ANSI escape sequences to get the visible text."""
-    global _ANSI_RE
-    if _ANSI_RE is None:
-        import re
-        _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
-    return _ANSI_RE.sub("", s)
-
-def _visual_rows(line: str, term_w: int) -> int:
-    """Number of visual rows a line occupies (≥1), accounting for terminal wrapping."""
-    w = len(_strip_ansi(line))
-    if w == 0:
-        return 1
-    # Reaching exactly term_w does NOT wrap in most terminals (cursor sits at edge),
-    # but exceeding it does.
-    return max(1, (w + term_w - 1) // term_w)
-
-def _clear_lines(n: int):
-    """Move cursor up n visual rows and clear each."""
-    sys.stdout.write("\r\033[2K")  # clear current line (cursor may be mid-line)
-    for _ in range(n - 1):
-        sys.stdout.write("\033[F\033[2K")
+_render_anchor_set = False
 
 def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
-    global _first_draw, _last_render_args, _last_visual_rows
+    global _last_render_args, _render_anchor_set
     _last_render_args = (usage, top_status, bottom_status)
 
     term_w = shutil.get_terminal_size((80, 24)).columns
@@ -412,14 +387,11 @@ def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
     if bottom_status:
         lines.append(bottom_status)
 
-    total_visual = sum(_visual_rows(line, term_w) for line in lines)
-
-    if not _first_draw:
-        _clear_lines(_last_visual_rows)
+    if _render_anchor_set:
+        sys.stdout.write("\033[u\033[J")
     else:
-        _first_draw = False
-
-    _last_visual_rows = total_visual
+        sys.stdout.write("\033[s")
+        _render_anchor_set = True
 
     for i, line in enumerate(lines):
         end = "\n" if i < len(lines) - 1 else ""
