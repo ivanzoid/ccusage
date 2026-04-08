@@ -2,9 +2,11 @@
 
 import json
 import os
+import tempfile
 import time
 import unittest
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import ccusage
@@ -20,9 +22,11 @@ from ccusage import (
     fetch_usage,
     usage_color,
     _draw_bar,
+    EventLogger,
     CYAN, GREEN, YELLOW, ORANGE, RED, TIME_COLOR, RESET, BOLD, DIM,
     FILLED, EMPTY, MARKER,
     STATE_PATH,
+    replay_event_log,
 )
 
 
@@ -439,6 +443,7 @@ class TestRenderRepaint(unittest.TestCase):
 
     def setUp(self):
         ccusage._last_render_args = None
+        ccusage._last_render_start_row = None
 
     def _render_and_capture(self, usage, top_status="", bottom_status="", term_w=80, term_h=24):
         import io
@@ -468,6 +473,29 @@ class TestRenderRepaint(unittest.TestCase):
         output = self._render_and_capture(usage, top_status="ok", bottom_status="warn", term_w=40, term_h=5)
         self.assertTrue(output.startswith("\033[2;1H\033[J"))
         self.assertIn("warn", output)
+
+    def test_shorter_followup_frame_clears_from_previous_start_row(self):
+        usage = {
+            "five_hour": {"utilization": 10.0, "resets_at": ""},
+            "seven_day": {"utilization": 20.0, "resets_at": ""},
+        }
+        long_status = "synced 59m ago (04:37)  Unauthorized (401) — run 'claude' to re-authenticate"
+        self._render_and_capture(usage, top_status=long_status, term_w=40, term_h=5)
+        output = self._render_and_capture(usage, top_status="", term_w=40, term_h=5)
+        self.assertTrue(output.startswith("\033[2;1H\033[J"))
+
+    def test_followup_frame_repositions_to_current_start_row_after_clear(self):
+        usage = {
+            "five_hour": {"utilization": 10.0, "resets_at": ""},
+            "seven_day": {"utilization": 20.0, "resets_at": ""},
+        }
+        # First frame wraps to 4 visual rows => start row 2 on a 5-line terminal.
+        long_status = "synced 59m ago (04:37)  Unauthorized (401) — run 'claude' to re-authenticate"
+        self._render_and_capture(usage, top_status=long_status, term_w=40, term_h=5)
+
+        # Follow-up frame uses only 3 visual rows => start row 3.
+        output = self._render_and_capture(usage, top_status="ok", term_w=40, term_h=5)
+        self.assertTrue(output.startswith("\033[2;1H\033[J\033[3;1H"))
 
 
 class TestInterruptibleSleep(unittest.TestCase):
@@ -564,6 +592,74 @@ class TestBuildBarStr(unittest.TestCase):
     def test_draw_bar_no_marker_without_reset_dt(self):
         line = _draw_bar("5h", 50.0, None, 20, 5 * 3600)
         self.assertNotIn(MARKER, line)
+
+
+class TestEventLog(unittest.TestCase):
+    def test_event_logger_preserves_existing_file_on_init(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            path.write_text(
+                json.dumps({"ts": "2026-04-08T10:00:00+00:00", "type": "old"}) + "\n"
+            )
+
+            logger = EventLogger(path)
+            logger.log("startup")
+
+            lines = path.read_text().splitlines()
+            self.assertEqual(len(lines), 2)
+            first = json.loads(lines[0])
+            second = json.loads(lines[1])
+            self.assertEqual(first["type"], "old")
+            self.assertEqual(second["type"], "startup")
+
+    def test_event_logger_writes_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            logger = EventLogger(path)
+            when = datetime(2026, 4, 8, tzinfo=timezone.utc)
+
+            logger.log("usage_updated", when=when, usage={"five_hour": {"utilization": 42.0}})
+
+            lines = path.read_text().splitlines()
+            self.assertEqual(len(lines), 1)
+            event = json.loads(lines[0])
+            self.assertEqual(event["type"], "usage_updated")
+            self.assertEqual(event["when"], when.isoformat())
+            self.assertEqual(event["usage"]["five_hour"]["utilization"], 42.0)
+
+    def test_replay_event_log_replays_render_events_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            path.write_text(
+                "\n".join([
+                    json.dumps({"ts": "2026-04-08T10:00:00+00:00", "type": "startup"}),
+                    json.dumps({
+                        "ts": "2026-04-08T10:00:01+00:00",
+                        "type": "render",
+                        "usage": {"five_hour": {"utilization": 11.0, "resets_at": ""}, "seven_day": {"utilization": 22.0, "resets_at": ""}},
+                        "top_status": "synced 2m ago",
+                        "bottom_status": "",
+                    }),
+                    json.dumps({"ts": "2026-04-08T10:00:02+00:00", "type": "sleep", "seconds": 30}),
+                    json.dumps({
+                        "ts": "2026-04-08T10:00:03+00:00",
+                        "type": "render",
+                        "usage": {"five_hour": {"utilization": 33.0, "resets_at": ""}, "seven_day": {"utilization": 44.0, "resets_at": ""}},
+                        "top_status": "",
+                        "bottom_status": "warning",
+                    }),
+                ])
+                + "\n"
+            )
+
+            with patch("ccusage.render") as mock_render:
+                replay_event_log(path)
+
+            self.assertEqual(mock_render.call_count, 2)
+            first = mock_render.call_args_list[0]
+            second = mock_render.call_args_list[1]
+            self.assertEqual(first.kwargs["top_status"], "synced 2m ago")
+            self.assertEqual(second.kwargs["bottom_status"], "warning")
 
 
 class TestStateCache(unittest.TestCase):

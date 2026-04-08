@@ -27,6 +27,7 @@ STATE_PATH = Path(
 )
 API_BASE = os.getenv("CCUSAGE_API_BASE", "https://api.anthropic.com")
 USAGE_ENDPOINT = os.getenv("CCUSAGE_USAGE_ENDPOINT", "/api/oauth/usage")
+EVENT_LOG_PATH = os.getenv("CCUSAGE_EVENT_LOG_PATH", str(Path.home() / ".ccusage_events.jsonl"))
 REFRESH_SECONDS = 120
 
 def _detect_12h() -> bool:
@@ -361,7 +362,71 @@ def _load_state(refresh_seconds: int = REFRESH_SECONDS) -> tuple | None:
 # ── Render loop ───────────────────────────────────────────────────────────────
 
 _last_render_args: tuple | None = None
+_last_render_start_row: int | None = None
 _resize_pending = False
+
+
+def _json_safe(value):
+    """Convert values to JSON-serializable shapes for event logging."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+class EventLogger:
+    """Append runtime events to a JSONL file for later replay."""
+
+    def __init__(self, path: str | Path | None):
+        self.path = Path(path) if path else None
+
+    def log(self, event_type: str, **data) -> None:
+        if self.path is None:
+            return
+        event = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": event_type,
+        }
+        event.update({k: _json_safe(v) for k, v in data.items()})
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, ensure_ascii=True) + "\n")
+        except Exception:
+            pass
+
+
+def replay_event_log(path: str | Path, speedup: float = 0.0) -> None:
+    """Replay recorded render events from a JSONL event log."""
+    prev_ts = None
+    with Path(path).open(encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line:
+                continue
+            event = json.loads(line)
+            if speedup > 0 and prev_ts and event.get("ts"):
+                cur_ts = datetime.fromisoformat(event["ts"])
+                delay = (cur_ts - prev_ts).total_seconds() / speedup
+                if delay > 0:
+                    time.sleep(delay)
+                prev_ts = cur_ts
+            elif event.get("ts"):
+                prev_ts = datetime.fromisoformat(event["ts"])
+            if event.get("type") != "render":
+                continue
+            render(
+                event.get("usage"),
+                top_status=event.get("top_status", ""),
+                bottom_status=event.get("bottom_status", ""),
+            )
 
 def _strip_ansi(s: str) -> str:
     """Remove ANSI escape sequences to get visible text width."""
@@ -376,7 +441,7 @@ def _visual_rows(line: str, term_w: int) -> int:
     return max(1, (w + term_w - 1) // term_w)
 
 def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
-    global _last_render_args
+    global _last_render_args, _last_render_start_row
     _last_render_args = (usage, top_status, bottom_status)
 
     term_size = shutil.get_terminal_size((80, 24))
@@ -414,13 +479,16 @@ def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
 
     total_visual = sum(_visual_rows(line, term_w) for line in lines)
     start_row = max(1, term_h - total_visual + 1)
-    # Reposition and repaint from the calculated start row each frame so
-    # variable line heights don't leave stale blank rows below the bars.
-    sys.stdout.write(f"\033[{start_row};1H\033[J")
+    clear_from = min(start_row, _last_render_start_row) if _last_render_start_row is not None else start_row
+    # Clear from the earliest row occupied by either frame, then move to the
+    # current frame's start row before painting.
+    sys.stdout.write(f"\033[{clear_from};1H\033[J\033[{start_row};1H")
 
     for i, line in enumerate(lines):
         end = "\n" if i < len(lines) - 1 else ""
         print(line, end=end, flush=True)
+
+    _last_render_start_row = start_row
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -445,13 +513,46 @@ def main():
         metavar="SECONDS",
         help=f"Poll interval in seconds (default: {REFRESH_SECONDS})",
     )
+    parser.add_argument(
+        "--event-log",
+        default=None,
+        metavar="PATH",
+        const=EVENT_LOG_PATH,
+        nargs="?",
+        help=f"Write JSONL runtime events to PATH (default path when omitted: {EVENT_LOG_PATH})",
+    )
+    parser.add_argument(
+        "--replay-log",
+        metavar="PATH",
+        help="Replay render events from a JSONL log instead of running live",
+    )
+    parser.add_argument(
+        "--replay-speed",
+        type=float,
+        default=0.0,
+        metavar="FACTOR",
+        help="Replay timing speedup factor; 0 replays immediately",
+    )
     args = parser.parse_args()
+
+    if args.replay_log:
+        replay_event_log(args.replay_log, speedup=args.replay_speed)
+        return
+
     refresh_seconds = args.interval
+    event_logger = EventLogger(args.event_log)
+    event_logger.log(
+        "startup",
+        interval=refresh_seconds,
+        event_log=args.event_log,
+        pid=os.getpid(),
+    )
 
     last_usage: dict | None = None
     last_success_at: datetime | None = None
 
     def _on_exit(*_):
+        event_logger.log("exit", usage=last_usage, last_success_at=last_success_at)
         _save_state(last_usage, last_success_at)
         print()
         sys.exit(0)
@@ -459,6 +560,7 @@ def main():
     def _on_resize(*_):
         global _resize_pending
         _resize_pending = True
+        event_logger.log("resize")
 
     signal.signal(signal.SIGINT, _on_exit)
     if hasattr(signal, "SIGWINCH"):
@@ -468,8 +570,16 @@ def main():
     cached = _load_state(refresh_seconds)
     if cached is not None:
         last_usage, last_success_at, initial_delay = cached
+        event_logger.log(
+            "state_loaded",
+            usage=last_usage,
+            last_success_at=last_success_at,
+            initial_delay=initial_delay,
+            backoff_until=_backoff_until,
+        )
     else:
         initial_delay = 0.0
+        event_logger.log("state_missing")
 
     next_fetch_at   = time.time() + initial_delay
     last_headers    = None
@@ -480,23 +590,30 @@ def main():
         err = None
 
         if now >= next_fetch_at:
+            event_logger.log("fetch_window_open", now=now)
             # Refresh headers every 4 minutes (tokens live ~1h)
             if now - last_header_fetch > 240:
                 new_headers, header_err = load_auth_headers()
                 if header_err is None:
                     last_headers = new_headers
                     last_header_fetch = now
+                    event_logger.log("auth_headers_loaded")
                 else:
                     err = header_err
+                    event_logger.log("auth_headers_failed", error=header_err)
 
             if err is None:
+                event_logger.log("fetch_start")
                 data, fetch_err = fetch_usage(last_headers)
                 err = fetch_err
+                event_logger.log("fetch_result", usage=data, error=fetch_err, backoff_until=_backoff_until)
                 if data is not None:
                     last_usage = data
                     last_success_at = datetime.now(timezone.utc)
+                    event_logger.log("usage_updated", usage=last_usage, last_success_at=last_success_at)
 
             next_fetch_at = time.time() + refresh_seconds
+            event_logger.log("next_fetch_scheduled", next_fetch_at=next_fetch_at)
 
         # ── single status line above bars ───────────────────────────────────
         if last_success_at is not None:
@@ -513,9 +630,17 @@ def main():
         else:
             status = f"{DIM}Waiting for first successful fetch…{RESET}"
 
+        event_logger.log(
+            "render",
+            usage=last_usage,
+            top_status=status,
+            bottom_status="",
+            err=err,
+        )
         render(last_usage, top_status=status)
 
         sleep_s = min(60, max(0.1, next_fetch_at - time.time()))
+        event_logger.log("sleep", seconds=sleep_s)
         _interruptible_sleep(sleep_s)
 
 if __name__ == "__main__":
