@@ -438,6 +438,19 @@ class TestRender(unittest.TestCase):
         bar_chars = lambda s: s.count("█") + s.count("░")
         self.assertGreater(bar_chars(out120), bar_chars(out40))
 
+    def test_render_keeps_longer_seven_day_reset_on_same_line(self):
+        now = datetime.now(timezone.utc)
+        usage = {
+            "five_hour": {"utilization": 3.0, "resets_at": (now + timedelta(hours=4, minutes=51)).isoformat()},
+            "seven_day": {"utilization": 18.0, "resets_at": (now + timedelta(days=5, hours=11)).isoformat()},
+        }
+        with patch("shutil.get_terminal_size", return_value=os.terminal_size((40, 24))):
+            out = self._capture_render(usage)
+        visible_lines = [ccusage._strip_ansi(line) for line in out.splitlines()]
+        seven_day_line = next(line for line in visible_lines if "7d" in line)
+        self.assertLessEqual(len(seven_day_line), 40)
+        self.assertTrue(seven_day_line.endswith(")"))
+
 class TestRenderRepaint(unittest.TestCase):
     """Verify render() repositions from terminal bottom each frame."""
 

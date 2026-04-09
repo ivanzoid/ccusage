@@ -292,10 +292,29 @@ def _build_bar_str(bar_width: int, filled: int, color: str, time_pos: int | None
     return "".join(parts)
 
 
-def _draw_bar(label: str, pct: float, reset_dt: datetime | None, bar_width: int, window_s: int) -> str:
+def _build_reset_str(reset_dt: datetime | None, secs_left: float | None = None) -> str:
+    """Build the reset countdown suffix shown after a bar."""
+    if reset_dt is None:
+        return ""
+    if secs_left is None:
+        secs_left = max(0.0, (reset_dt - datetime.now(timezone.utc)).total_seconds())
+    rel = _dim_separators(_format_relative(secs_left), TIME_COLOR)
+    abso = _format_absolute(reset_dt)
+    return f"  {TIME_COLOR}in {rel}{RESET} {DIM}({abso}){RESET}"
+
+
+def _draw_bar(
+    label: str,
+    pct: float,
+    reset_dt: datetime | None,
+    bar_width: int,
+    window_s: int,
+    now_utc: datetime | None = None,
+    reset_str: str | None = None,
+) -> str:
     """Return a single colored bar line (no trailing newline)."""
     pct = max(0.0, min(pct, 100.0))
-    now_utc = datetime.now(timezone.utc)
+    now_utc = now_utc or datetime.now(timezone.utc)
 
     burn_ratio = None
     elapsed_frac = None
@@ -313,12 +332,8 @@ def _draw_bar(label: str, pct: float, reset_dt: datetime | None, bar_width: int,
 
     pct_str = f"{round(pct):3d}%"
 
-    if reset_dt and secs_left is not None:
-        rel  = _dim_separators(_format_relative(secs_left), TIME_COLOR)
-        abso = _format_absolute(reset_dt)
-        reset_str = f"  {TIME_COLOR}in {rel}{RESET} {DIM}({abso}){RESET}"
-    else:
-        reset_str = ""
+    if reset_str is None:
+        reset_str = _build_reset_str(reset_dt, secs_left)
 
     return f"{BOLD}{label}{RESET} {color}{BOLD}{pct_str}{RESET} {bar}{reset_str}"
 
@@ -448,14 +463,6 @@ def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
     term_w = term_size.columns
     term_h = term_size.lines
 
-    # Fixed overhead: label(2) + space(1) + pct(4) + space(1) + reset + safety(1)
-    # reset max: 24h "  in 1d 2h (Mon 23:59)" = 22, 12h "  in 1d 2h (Mon 12:30 PM)" = 25
-    # Subtract 1 extra to stay under term_w — reaching the last column triggers
-    # auto-wrap in most terminals, which adds a spurious newline.
-    reset_max = 25 if _USE_12H else 22
-    overhead = 2 + 1 + 4 + 1 + reset_max + 1
-    bar_w = max(10, term_w - overhead)
-
     lines = []
 
     lines.append(top_status)  # always reserve the line; may be empty
@@ -468,9 +475,21 @@ def render(usage: dict | None, top_status: str = "", bottom_status: str = ""):
         sd_pct = float(sd.get("utilization", 0))
         fh_reset = _parse_reset(fh.get("resets_at", ""))
         sd_reset = _parse_reset(sd.get("resets_at", ""))
+        now_utc = datetime.now(timezone.utc)
 
-        lines.append(_draw_bar("5h", fh_pct, fh_reset, bar_w, 5 * 3600))
-        lines.append(_draw_bar("7d", sd_pct, sd_reset, bar_w, 7 * 86400))
+        fh_secs_left = max(0.0, (fh_reset - now_utc).total_seconds()) if fh_reset else None
+        sd_secs_left = max(0.0, (sd_reset - now_utc).total_seconds()) if sd_reset else None
+        fh_reset_str = _build_reset_str(fh_reset, fh_secs_left)
+        sd_reset_str = _build_reset_str(sd_reset, sd_secs_left)
+
+        # Size the shared bar from the longest reset suffix actually present in
+        # this frame. Staying below the last terminal column avoids auto-wrap.
+        prefix_w = len("7d 100% ")
+        reset_w = max(len(_strip_ansi(fh_reset_str)), len(_strip_ansi(sd_reset_str)))
+        bar_w = max(1, term_w - prefix_w - reset_w - 1)
+
+        lines.append(_draw_bar("5h", fh_pct, fh_reset, bar_w, 5 * 3600, now_utc, fh_reset_str))
+        lines.append(_draw_bar("7d", sd_pct, sd_reset, bar_w, 7 * 86400, now_utc, sd_reset_str))
     else:
         lines.append("Fetching…")
 
