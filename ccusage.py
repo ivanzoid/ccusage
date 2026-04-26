@@ -524,7 +524,7 @@ def _interruptible_sleep(seconds: float):
 
 def main():
     parser = argparse.ArgumentParser(description="Claude Code rate-limit monitor")
-    parser.add_argument("--version", action="version", version="%(prog)s 1.6.1")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.6.2")
     parser.add_argument(
         "-i", "--interval",
         type=int,
